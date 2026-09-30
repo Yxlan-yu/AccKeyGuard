@@ -1,0 +1,7 @@
+id=acckeyguard
+name=无障碍保活
+version=v1.0.0
+versionCode=100
+author=Yxlan-yu
+description=动态守护无障碍服务，防被系统自动关闭。WebUI 可勾选哪些服务参与保活。
+webuiIcon=webroot/icon.svg
