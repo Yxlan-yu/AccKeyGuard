@@ -121,7 +121,15 @@ async function loadAllData() {
 }
 
 function normalizeList(str) {
-  return String(str || '').split(':').map(s => s.trim()).filter(Boolean);
+  // 把 pkg/.Class 简写展开为完整 pkg/pkg.Class，与 query-services 输出格式对齐
+  // （settings get 存的是 ComponentName 短格式，query-services --components 是完整格式）
+  return String(str || '').split(':').map(s => s.trim()).filter(Boolean).map(c => {
+    const i = c.indexOf('/');
+    if (i < 0) return c;
+    const pkg = c.slice(0, i), cls = c.slice(i + 1);
+    if (cls.startsWith('.')) return pkg + '/' + pkg + cls;
+    return c;
+  }).filter((c, idx, arr) => arr.indexOf(c) === idx);
 }
 
 // 轻量轮询：只拉 enabled + config + 守护状态，更新徽标与状态；不重扫服务列表
@@ -424,7 +432,7 @@ function showDetail(comp) {
 }
 
 async function save() {
-  const items = state.wanted.filter(x => x.length);
+  const items = state.wanted.map(x => normalizeList(x)[0]).filter(x => x && x.length);
   const val = items.join(':');
   await run(`KSU_MODULE=${MOD_ID} /data/adb/ksu/bin/ksud module config set enabled_services '${val}' 2>/dev/null`);
   $('btnSave').disabled = true;

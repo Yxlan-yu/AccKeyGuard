@@ -15,10 +15,25 @@ get_enabled() {
     settings get secure enabled_accessibility_services 2>/dev/null
 }
 
-# 从配置读取要保活的服务列表，二次剔除空项、只保留唯一值
+# 把组件名归一化为完整形式 pkg/pkg.Class；简写 ".Class" 或 "pkg/.Class" 会展开。
+# settings 存的可能是 ComponentName.flattenToShortString 的 pkg/.Class 简写，
+# 而 query-services --components / 用户配置存的是完整 pkg/pkg.Class，
+# 不归一化会误判"缺失"导致每轮重复补写刷日志。
+normalize() {
+    tr ':' '\n' | while IFS=/ read -r pkg cls; do
+        [ -z "$pkg" ] && continue
+        [ -z "$cls" ] && { echo "$pkg"; continue; }
+        case "$cls" in
+            .*) echo "$pkg/$pkg$cls" ;;
+            *)  echo "$pkg/$cls" ;;
+        esac
+    done
+}
+
+# 从配置读取要保活的服务列表，二次剔除空项、只保留唯一值（归一化为完整形式）
 get_wanted() {
     KSU_MODULE=$MOD_ID /data/adb/ksu/bin/ksud module config get enabled_services 2>/dev/null \
-        | tr ':' '\n' | sed 's/[[:space:]]//g' | grep -v '^$' | sort -u | tr '\n' ':'
+        | tr ':' '\n' | sed 's/[[:space:]]//g' | grep -v '^$' | normalize | sort -u | tr '\n' ':'
 }
 
 log() {
@@ -40,7 +55,7 @@ log "守护启动 PID=$$"
 
 while true; do
     wanted=$(get_wanted)
-    enabled=$(get_enabled)
+    enabled=$(get_enabled | normalize)
 
     if [ -z "$wanted" ]; then
         # 配置为空：首次运行，把当前已启用的服务接管为保活列表
