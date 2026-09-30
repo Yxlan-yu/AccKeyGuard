@@ -188,9 +188,11 @@ function setPill(cls, text) {
   pill.dataset.st = cls + '|' + text;
 }
 
-// 只更新列表里已有的徽标 + checkbox 状态，不重建 DOM（轮询时保持滚动位置与交互）
+// 只更新列表里已有的徽标 + checkbox 状态，并按最新状态重排，不重建 DOM（轮询时保持滚动位置与交互）
 function livePatchBadges() {
-  document.querySelectorAll('#serviceList .svc').forEach(row => {
+  const list = $('serviceList');
+  const rows = Array.from(list.querySelectorAll('.svc'));
+  rows.forEach(row => {
     const comp = row.getAttribute('data-comp');
     if (!comp) return;
     const enabled = state.enabledSet.has(comp);
@@ -200,6 +202,9 @@ function livePatchBadges() {
     const cb = row.querySelector('input[type=checkbox][data-comp]');
     if (cb && cb.checked !== wanted) cb.checked = wanted;
   });
+  // 原地重排：按最新状态把 DOM 节点移动到位，不重建
+  rows.sort((a, b) => rankOf(a.getAttribute('data-comp')) - rankOf(b.getAttribute('data-comp')));
+  rows.forEach(node => list.appendChild(node));
 }
 
 function refreshDetailRow() {
@@ -282,12 +287,22 @@ function startPolling() {
   state.pollTimer = setInterval(pollLight, REFRESH_MS);
 }
 
+// 排序级别：0=已开启且已守护，1=已开启未守护，2=未开启
+function rankOf(comp) {
+  const enabled = state.enabledSet.has(comp);
+  const wanted = state.wanted.includes(comp);
+  if (enabled && wanted) return 0;
+  if (enabled) return 1;
+  return 2;
+}
+
 function render() {
   const list = $('serviceList');
   if (!state.all.length) { list.innerHTML = '<div class="loading">未扫描到无障碍服务</div>'; return; }
 
   const wantedSet = new Set(state.wanted);
-  const rows = state.all.map(comp => {
+  const sorted = [...state.all].sort((a, b) => rankOf(a) - rankOf(b));
+  const rows = sorted.map(comp => {
     const [pkg, svc] = comp.split('/');
     const enabled = state.enabledSet.has(comp);
     const wanted = wantedSet.has(comp);
@@ -320,7 +335,7 @@ function render() {
       if (!dataUrl) return;
       list.querySelectorAll(`[data-avatar="${pkg}"]:not(.loaded)`).forEach(v => {
         v.classList.add('loaded');
-        v.innerHTML = `<img src="${dataUrl}" style="width:100%;height:100%;border-radius:50%;object-fit:cover">`;
+        v.innerHTML = `<img onerror="this.parentElement.classList.remove('loaded');this.remove()" src="${dataUrl}" style="width:100%;height:100%;border-radius:50%;object-fit:cover">`;
       });
     });
   };
@@ -420,16 +435,21 @@ async function showLogs() {
   $('detailContent').innerHTML = `
     <div class="detail-card">
       <h2>守护日志</h2>
-      <div id="logs">${await run('cat /data/adb/modules/acckeyguard/data/accd.log 2>/dev/null | tail -50') || '（暂无日志）'}</div>
+      <div id="logs">${await getLogTail() || '（暂无日志）'}</div>
     </div>`;
   // 日志自动刷新
   if (state.logTimer) clearInterval(state.logTimer);
   state.logTimer = setInterval(async () => {
     const box = $('logs');
     if (!box) return;
-    const txt = await run('cat /data/adb/modules/acckeyguard/data/accd.log 2>/dev/null | tail -50');
+    const txt = await getLogTail();
     if (box.innerHTML !== txt) box.innerHTML = txt;
   }, 5000);
+}
+
+// 取日志尾部 50 行并倒序：新日志在前（accd 往文件末尾追加，tac 反转后取前 50）
+async function getLogTail() {
+  return run('tac /data/adb/modules/acckeyguard/data/accd.log 2>/dev/null | head -50');
 }
 
 $('btnRefresh').addEventListener('click', async () => {

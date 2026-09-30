@@ -2,9 +2,10 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <title>无障碍保活</title>
-<link rel="stylesheet" href="style.css?v=7">
+<link rel="stylesheet" href="https://mui.kernelsu.org/internal/insets.css">
+<link rel="stylesheet" href="style.css?v=12">
 </head>
 <body>
 <header>
@@ -18,6 +19,11 @@
     <button class="theme-btn" data-v="light">浅色</button>
     <button class="theme-btn" data-v="dark">深色</button>
   </div>
+  <div class="header-actions">
+    <button id="btnRefresh" class="btn ghost small">重新扫描</button>
+    <button id="btnSave" class="btn primary small" disabled>保存设置</button>
+    <button id="btnLogs" class="btn ghost small">查看日志</button>
+  </div>
 </header>
 
 <main id="mainView">
@@ -25,10 +31,6 @@
     <div class="loading">正在扫描无障碍服务...</div>
   </div>
 
-  <div class="actions">
-    <button id="btnRefresh" class="btn ghost">重新扫描</button>
-    <button id="btnSave" class="btn primary" disabled>保存设置</button>
-  </div>
   <div class="auto-refresh-badge" id="autoBadge" title="每 5 秒自动刷新状态，无需手动重新扫描">
     <span class="dot"></span><span id="autoBadgeText">自动刷新中</span>
   </div>
@@ -40,11 +42,6 @@
   <div id="detailContent"></div>
 </div>
 
-<footer>
-  <button id="btnLogs" class="link">查看日志</button>
-  <span id="info"></span>
-</footer>
-
-<script type="module" src="app.js?v=7"></script>
+<script type="module" src="app.js?v=9"></script>
 </body>
 </html>
