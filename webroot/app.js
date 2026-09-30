@@ -15,6 +15,7 @@ const state = {
   labels: {},     // 包名 -> 应用名
   pollTimer: null,
   refreshing: false,
+  query: '',
 };
 
 // ---------- 主题 ----------
@@ -87,6 +88,10 @@ function toast(msg) {
   setTimeout(() => t.remove(), 2000);
 }
 
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]);
+}
+
 async function run(cmd) {
   try {
     const { errno, stdout, stderr } = await exec(cmd);
@@ -114,22 +119,26 @@ async function loadAllData() {
   ]);
   const parts = out.split('XSEP').filter(Boolean);
   const b = s => { try { return decodeURIComponent(escape(atob(s))); } catch (e) { return ''; } };
-  const services = b(parts[0] || '').split('\n').map(s => s.trim()).filter(Boolean);
+  const services = b(parts[0] || '').split('\n').map(s => s.trim()).filter(Boolean).map(normComp);
   const enabled = b(parts[1] || '');
   const cfg = b(parts[2] || '');
   return { services, enabled, cfg };
 }
 
+// 把 pkg/.Class 简写展开为完整 pkg/pkg.Class（query-services / settings get 通用）
+function normComp(c) {
+  const s = String(c).trim();
+  const i = s.indexOf('/');
+  if (i < 0) return s;
+  const pkg = s.slice(0, i), cls = s.slice(i + 1);
+  if (cls.startsWith('.')) return pkg + '/' + pkg + cls;
+  return s;
+}
+
 function normalizeList(str) {
   // 把 pkg/.Class 简写展开为完整 pkg/pkg.Class，与 query-services 输出格式对齐
-  // （settings get 存的是 ComponentName 短格式，query-services --components 是完整格式）
-  return String(str || '').split(':').map(s => s.trim()).filter(Boolean).map(c => {
-    const i = c.indexOf('/');
-    if (i < 0) return c;
-    const pkg = c.slice(0, i), cls = c.slice(i + 1);
-    if (cls.startsWith('.')) return pkg + '/' + pkg + cls;
-    return c;
-  }).filter((c, idx, arr) => arr.indexOf(c) === idx);
+  return String(str || '').split(':').map(s => s.trim()).filter(Boolean).map(normComp)
+    .filter((c, idx, arr) => arr.indexOf(c) === idx);
 }
 
 // 轻量轮询：只拉 enabled + config + 守护状态，更新徽标与状态；不重扫服务列表
@@ -312,7 +321,16 @@ function render() {
   if (!state.all.length) { list.innerHTML = '<div class="loading">未扫描到无障碍服务</div>'; return; }
 
   const wantedSet = new Set(state.wanted);
-  const sorted = [...state.all].sort((a, b) => rankOf(a) - rankOf(b));
+  const q = state.query.trim().toLowerCase();
+  const filtered = q
+    ? state.all.filter(c => {
+        const pkg = c.split('/')[0] || '';
+        return c.toLowerCase().includes(q) || pkg.toLowerCase().includes(q) || appLabel(pkg).toLowerCase().includes(q);
+      })
+    : state.all;
+  if (!filtered.length) { list.innerHTML = '<div class="loading">没有匹配“' + escapeHtml(state.query.trim()) + '”的服务</div>'; return; }
+
+  const sorted = [...filtered].sort((a, b) => rankOf(a) - rankOf(b));
   const rows = sorted.map(comp => {
     const [pkg, svc] = comp.split('/');
     const enabled = state.enabledSet.has(comp);
@@ -328,7 +346,7 @@ function render() {
         <div class="svc-pkg">${pkg !== label ? pkg : ''}</div>
         <div class="svc-cmp">${svc || ''}</div>
       </div>
-      <span class="svc-badge ${enabled ? 'on' : 'off'}" style="flex-shrink:0">${enabled ? '已启用' : '已停用'}</span>
+      <span class="svc-badge ${enabled ? 'on' : 'off'}" style="flex-shrink:0;cursor:pointer" onclick="event.stopPropagation()" title="${enabled ? '点击停用' : '点击启用'}">${enabled ? '已启用' : '已停用'}</span>
       <label class="switch" onclick="event.stopPropagation()">
         <input type="checkbox" data-comp="${comp}" ${wanted ? 'checked' : ''}>
         <span class="slider"></span>
@@ -363,12 +381,24 @@ function render() {
 
   // 绑定 checkbox 变化
   list.querySelectorAll('input[type=checkbox]').forEach(cb => {
-    cb.addEventListener('change', () => {
+    cb.addEventListener('change', async () => {
       const comp = cb.dataset.comp;
-      if (cb.checked) { if (!state.wanted.includes(comp)) state.wanted.push(comp); }
+      const willGuard = cb.checked;
+      if (willGuard) { if (!state.wanted.includes(comp)) state.wanted.push(comp); }
       else state.wanted = state.wanted.filter(x => x !== comp);
       state.dirty = true;
       $('btnSave').disabled = false;
+
+      // 顺带开关无障碍询问：
+      // 勾选守护 → 若当前未启用，问是否顺带启用；取消守护 → 若当前启用，问是否顺带停用
+      const currentlyOn = state.enabledSet.has(comp);
+      if (willGuard && !currentlyOn) {
+        const ok = await askConfirm('开启守护，是否顺带启用该无障碍服务？');
+        if (ok) { await setAccessibility(comp, true); toast('已顺带启用无障碍'); }
+      } else if (!willGuard && currentlyOn) {
+        const ok = await askConfirm('取消守护，是否顺带停用该无障碍服务？');
+        if (ok) { await setAccessibility(comp, false); toast('已顺带停用无障碍'); }
+      }
       // 立即按最新状态重排 + 刷新徽标，不用等轮询
       livePatchBadges();
     });
@@ -378,6 +408,79 @@ function render() {
   list.querySelectorAll('.svc-info').forEach(el => {
     el.addEventListener('click', () => showDetail(el.dataset.comp));
   });
+
+  // 点击状态徽标直接切换无障碍启用/停用
+  list.querySelectorAll('.svc-badge').forEach(b => {
+    b.addEventListener('click', async () => {
+      const comp = b.parentElement.dataset.comp;
+      const on = !state.enabledSet.has(comp);
+      await setAccessibility(comp, on);
+      toast(on ? '已启用无障碍' : '已停用无障碍，若在守护列表将自动移出守护');
+    });
+  });
+}
+
+// 手写确认浮层（KernelSU WebView 的 window.confirm 不可靠，自建可靠）
+function askConfirm(msg) {
+  return new Promise(resolve => {
+    const old = $('confirmOverlay');
+    if (old) old.remove();
+    const ov = document.createElement('div');
+    ov.id = 'confirmOverlay';
+    ov.className = 'confirm-overlay';
+    ov.innerHTML = `
+      <div class="confirm-card">
+        <div class="confirm-msg">${msg}</div>
+        <div class="confirm-actions">
+          <button class="btn ghost" id="cfNo" type="button">取消</button>
+          <button class="btn primary" id="cfYes" type="button">确定</button>
+        </div>
+      </div>`;
+    const done = val => { ov.remove(); resolve(val); };
+    ov.querySelector('#cfNo').addEventListener('click', () => done(false));
+    ov.querySelector('#cfYes').addEventListener('click', () => done(true));
+    ov.addEventListener('click', e => { if (e.target === ov) done(false); });
+    document.body.appendChild(ov);
+  });
+}
+
+// 直接启用/停用无障碍服务：读当前 enabled 全列表 → 增删目标 → 写回。
+// 守护列表里的服务被停用时自动移出守护（accd 每 20s 会把守护列表内缺失的服务补回，
+// 不移除会导致这边关了 accd 又开回）。
+async function setAccessibility(comp, on) {
+  const cur = normalizeList(await run('settings get secure enabled_accessibility_services 2>/dev/null'));
+  let next;
+  if (on) {
+    next = cur.includes(comp) ? cur : [...cur, comp];
+  } else {
+    next = cur.filter(x => x !== comp);
+  }
+  if (on) {
+    await run(`settings put secure enabled_accessibility_services '${next.join(':')}' 2>/dev/null`);
+    await run(`settings put secure accessibility_enabled 1 2>/dev/null`);
+  } else {
+    if (next.length) {
+      await run(`settings put secure enabled_accessibility_services '${next.join(':')}' 2>/dev/null`);
+    } else {
+      // 清空整个列表（实测空串可写入，读回为空）
+      await run(`settings put secure enabled_accessibility_services '' 2>/dev/null`);
+      await run(`settings put secure accessibility_enabled 0 2>/dev/null`);
+    }
+    // 若该服务在守护列表中，同步移出，避免 accd 补回
+    if (state.wanted.includes(comp)) {
+      state.wanted = state.wanted.filter(x => x !== comp);
+      state.dirty = true;
+      $('btnSave').disabled = false;
+    }
+  }
+  // 更新本页状态，立即生效无需等轮询
+  state.enabledSet = new Set(normalizeList(next));
+  if (state.current === comp && $('detailView') && !$('detailView').classList.contains('hidden')) {
+    refreshDetailRow();
+  } else if ($('mainView') && !$('mainView').classList.contains('hidden')) {
+    livePatchBadges();
+  }
+  return next;
 }
 
 function showDetail(comp) {
@@ -407,8 +510,12 @@ function showDetail(comp) {
       <div class="detail-row"><span class="k">当前状态</span><span class="v">${enabled ? '已启用' : '已停用'}</span></div>
       <div class="detail-row"><span class="k">守护中</span><span class="v">${wanted ? '是' : '否'}</span></div>
     </div>
-    <div class="actions" style="margin-top:12px">
-      <button id="btnToggle" class="btn ${wanted ? 'danger' : 'primary'}">${wanted ? '取消守护该服务' : '加入守护'}</button>
+    <div class="actions" style="margin-top:12px;flex-direction:column">
+      <button id="btnAcc" class="btn ${enabled ? 'danger' : 'primary'}">${enabled ? '停用无障碍功能' : '启用无障碍功能'}</button>
+      <div class="actions">
+        <button id="btnToggle" class="btn ${wanted ? 'danger' : 'primary'}">${wanted ? '取消守护该服务' : '加入守护'}</button>
+        <button id="btnSaveHome" class="btn primary">保存并返回主页</button>
+      </div>
     </div>`;
 
   loadIcon(pkg).then(dataUrl => {
@@ -416,6 +523,12 @@ function showDetail(comp) {
     $('detailContent').querySelectorAll(`[data-avatar="${pkg}"]`).forEach(el => {
       el.innerHTML = `<img src="${dataUrl}" style="width:100%;height:100%;border-radius:50%;object-fit:cover">`;
     });
+  });
+
+  $('btnAcc').addEventListener('click', async () => {
+    const next = await setAccessibility(comp, !enabled);
+    toast(enabled ? '已停用无障碍，若在守护列表将自动移出守护' : '已启用无障碍');
+    showDetail(comp);
   });
 
   $('btnToggle').addEventListener('click', () => {
@@ -427,8 +540,22 @@ function showDetail(comp) {
     state.dirty = true;
     $('btnSave').disabled = false;
     showDetail(comp);
-    toast('已更新，请返回并保存');
+    toast('已更新，请保存');
   });
+
+  $('btnSaveHome').addEventListener('click', async () => {
+    await save();
+    goHome();
+    toast('已保存并返回主页');
+  });
+}
+
+function goHome() {
+  $('detailView').classList.add('hidden');
+  $('mainView').classList.remove('hidden');
+  if (state.logTimer) { clearInterval(state.logTimer); state.logTimer = null; }
+  state.current = null;
+  if (state.dirty) { render(); }
 }
 
 async function save() {
@@ -473,14 +600,36 @@ $('btnRefresh').addEventListener('click', async () => {
 
 $('btnSave').addEventListener('click', save);
 
-$('btnBack').addEventListener('click', () => {
-  $('detailView').classList.add('hidden');
-  $('mainView').classList.remove('hidden');
-  if (state.logTimer) { clearInterval(state.logTimer); state.logTimer = null; }
-  if (state.dirty) { render(); }
-});
+$('btnBack').addEventListener('click', goHome);
 
 $('btnLogs').addEventListener('click', showLogs);
+
+const searchInput = $('searchInput');
+const searchClear = $('searchClear');
+function updateSearchClear() {
+  if (searchClear) searchClear.classList.toggle('show', !!(searchInput && searchInput.value));
+}
+if (searchInput) {
+  searchInput.addEventListener('input', () => {
+    state.query = searchInput.value;
+    updateSearchClear();
+    if ($('mainView') && !$('mainView').classList.contains('hidden')) {
+      render();
+    }
+  });
+}
+if (searchClear) {
+  searchClear.addEventListener('click', () => {
+    if (!searchInput) return;
+    searchInput.value = '';
+    state.query = '';
+    updateSearchClear();
+    if ($('mainView') && !$('mainView').classList.contains('hidden')) {
+      render();
+    }
+    searchInput.focus();
+  });
+}
 
 bindTheme();
 load();

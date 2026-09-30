@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <title>无障碍保活</title>
 <link rel="stylesheet" href="https://mui.kernelsu.org/internal/insets.css">
-<link rel="stylesheet" href="style.css?v=12">
+<link rel="stylesheet" href="style.css?v=18">
 </head>
 <body>
 <header>
@@ -13,11 +13,17 @@
     <h1>无障碍保活</h1>
     <span id="statusPill" class="pill">检查中</span>
   </div>
-  <p class="subtitle">勾选需要守护的无障碍服务，防止被系统自动关闭</p>
+  <p class="subtitle">勾选需要守护的无障碍服务，防止被系统自动关闭；也可点状态徽标直接启用/停用无障碍</p>
   <div class="theme-bar" id="themeBar">
-    <button class="theme-btn" data-v="auto">跟随系统</button>
-    <button class="theme-btn" data-v="light">浅色</button>
-    <button class="theme-btn" data-v="dark">深色</button>
+    <div class="theme-btns">
+      <button class="theme-btn" data-v="auto">跟随系统</button>
+      <button class="theme-btn" data-v="light">浅色</button>
+      <button class="theme-btn" data-v="dark">深色</button>
+    </div>
+    <div class="search-wrap">
+      <input id="searchInput" class="search-input" type="search" placeholder="搜索应用 / 服务" autocomplete="off" spellcheck="false">
+      <button id="searchClear" class="search-clear" type="button" aria-label="清除搜索" title="清除搜索">×</button>
+    </div>
   </div>
   <div class="header-actions">
     <button id="btnRefresh" class="btn ghost small">重新扫描</button>
@@ -42,6 +48,6 @@
   <div id="detailContent"></div>
 </div>
 
-<script type="module" src="app.js?v=10"></script>
+<script type="module" src="app.js?v=19"></script>
 </body>
 </html>
