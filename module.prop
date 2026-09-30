@@ -1,7 +1,8 @@
 id=acckeyguard
 name=无障碍保活
-version=v1.1.0
-versionCode=110
+version=v1.2.0
+versionCode=120
 author=Yxlan-yu
 description=动态守护无障碍服务，防被系统自动关闭；支持在 WebUI 内直接启用/停用无障碍服务、搜索服务、浅色/深色/跟随系统三主题。
+updateJson=https://raw.githubusercontent.com/Yxlan-yu/AccKeyGuard/main/update.json
 webuiIcon=webroot/icon.svg
