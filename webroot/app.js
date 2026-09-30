@@ -139,9 +139,12 @@ async function pollLight() {
     const cfgStr = cfgErr ? '' : (cfgOut || '');
     const newEnabled = new Set(normalizeList(enabledStr));
 
-    if (cfgStr.trim() !== '' || !state.wantedLoaded) {
+    // 配置同步：仅当没有未保存的本地改动时，才用后端配置覆盖 state.wanted。
+    // 否则用户刚勾选/取消但还没点保存，轮询读到的是旧配置，把它还原回去 = "显示跟不上"。
+    let cfgChanged = false;
+    if ((cfgStr.trim() !== '' || !state.wantedLoaded) && !state.dirty) {
       const newWanted = normalizeList(cfgStr);
-      const cfgChanged = JSON.stringify(newWanted) !== JSON.stringify(state.wanted);
+      cfgChanged = JSON.stringify(newWanted) !== JSON.stringify(state.wanted);
       if (cfgChanged) {
         state.wanted = newWanted;
         state.wantedLoaded = true;
@@ -153,7 +156,7 @@ async function pollLight() {
     const enabledChanged = state.enabledSet.size !== newEnabled.size ||
       [...state.enabledSet].some(v => !newEnabled.has(v)) ||
       [...newEnabled].some(v => !state.enabledSet.has(v));
-    if (enabledChanged || cfgChanged) {
+    if (enabledChanged) {
       state.enabledSet = newEnabled;
       if ($('mainView') && !$('mainView').classList.contains('hidden')) {
         livePatchBadges();
@@ -161,7 +164,7 @@ async function pollLight() {
       if (state.current) {
         refreshDetailRow();
       }
-    } else {
+    } else if (!cfgChanged) {
       state.enabledSet = newEnabled;
     }
 
@@ -358,6 +361,8 @@ function render() {
       else state.wanted = state.wanted.filter(x => x !== comp);
       state.dirty = true;
       $('btnSave').disabled = false;
+      // 立即按最新状态重排 + 刷新徽标，不用等轮询
+      livePatchBadges();
     });
   });
 
