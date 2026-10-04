@@ -40,10 +40,12 @@ log() {
     echo "$(date '+%m-%d %H:%M:%S') $1" >> "$LOGFILE"
 }
 
-# 防止多实例
+# 防止多实例：kill -0 只能证明 PID 存活，重启后 PID 会被无关进程复用，
+# 必须校验 /proc/<pid>/cmdline 确实是本脚本，否则误判"守护仍在"导致守护永久缺席。
 if [ -f "$PIDFILE" ]; then
     old=$(cat "$PIDFILE" 2>/dev/null)
-    if [ -n "$old" ] && kill -0 "$old" 2>/dev/null; then
+    if [ -n "$old" ] && kill -0 "$old" 2>/dev/null \
+        && grep -q "accd.sh" "/proc/$old/cmdline" 2>/dev/null; then
         log "已有守护进程 PID=$old，退出"
         exit 0
     fi
