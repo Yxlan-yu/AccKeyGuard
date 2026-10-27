@@ -1,0 +1,51 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.yxlanyu.acckeyguard'
+    compileSdk 37
+
+    defaultConfig {
+        applicationId "com.yxlanyu.acckeyguard"
+        minSdk 26
+        targetSdk 34
+        versionCode 100
+        versionName "1.0.0"
+    }
+
+    signingConfigs {
+        release {
+            storeFile file('akg.keystore')
+            storePassword 'akg2026guard'
+            keyAlias 'akg'
+            keyPassword 'akg2026guard'
+        }
+    }
+
+    buildTypes {
+        debug {
+            signingConfig signingConfigs.release
+            minifyEnabled false
+        }
+        release {
+            signingConfig signingConfigs.release
+            minifyEnabled false
+            shrinkResources false
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    lint {
+        abortOnError false
+        checkReleaseBuilds false
+    }
+}
+
+dependencies {
+    compileOnly project(':xposedapi')
+}
