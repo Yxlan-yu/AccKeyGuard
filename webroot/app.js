@@ -1,15 +1,16 @@
 import { exec, getPackagesInfo } from './kernelsu.js';
 
 /* =========================================================================
-   AccKeyGuard WebUI  v1.3.0
+   AccKeyGuard WebUI  v1.3.1
 
-   设计要点（相对旧版的改动）：
+   设计要点：
    - 一个开关只有一个含义：列表里的开关 = 「保活守护」，不再和「无障碍开关」混在一起
    - 没有「保存设置」按钮：改动即时落盘（防抖 350ms），不会出现忘记保存而丢失改动
-   - 不再弹出「是否顺带启用」确认框：开启守护时若服务没开就直接启用（这正是守护的含义）
-   - 列表不再随状态重排：排序稳定，轮询只原地更新徽标，不会在滑动时跳走
+   - 开启守护时若服务没开就直接启用（这正是守护的含义），不再弹确认框
+   - 排序由用户决定且会被记住；轮询只原地更新徽标，不会让行跳走
+   - 只有需要动手时才出横幅：守护没运行 / 有守护项被系统关掉
+   - 同步（把守护列表重新应用到系统）只在 WebUI 里做，入口叫「立即恢复」
    - 详情 / 设置 / 日志都是底部弹层，关闭即回到原位，不丢滚动位置
-   - 守护未运行时给出可点击的横幅，一键启动
    ========================================================================= */
 
 const MOD_ID = 'acckeyguard';
@@ -22,12 +23,13 @@ const CFG_ENABLED = 'enabled_services';
 const CFG_THEME = 'theme';
 const CFG_INTERVAL = 'check_interval';
 
-const VERSION = 'v1.3.0';
+const VERSION = 'v1.3.1';
 const POLL_MS = 5000;
 const FULL_REFRESH_MS = 20000;
 
 const LS_THEME = 'akg.theme';
 const LS_LABELS = 'akg.labels';
+const LS_SORT = 'akg.sort';
 
 const HAS_KSU = typeof window.ksu !== 'undefined';
 
@@ -49,6 +51,7 @@ const state = {
 
   query: '',
   filter: 'all',
+  sort: 'name',
 
   guardAlive: false,
   guardPid: '',
@@ -415,6 +418,40 @@ const FILTERS = [
   { k: 'off', label: '未启用' },
 ];
 
+const SORTS = [
+  { k: 'name', label: '按应用名', desc: '按名称 A → Z 排列' },
+  { k: 'nameDesc', label: '按应用名倒序', desc: '按名称 Z → A 排列' },
+  { k: 'guarded', label: '守护优先', desc: '已在守护列表里的排前面' },
+  { k: 'attention', label: '待处理优先', desc: '守护中却没启用的排最前面' },
+];
+
+function sortKeyOf(k) {
+  return SORTS.some(s => s.k === k) ? k : 'name';
+}
+
+function loadSort() {
+  let v = '';
+  try { v = localStorage.getItem(LS_SORT) || ''; } catch (e) {}
+  state.sort = sortKeyOf(v);
+  syncSortBtn();
+}
+
+function setSort(k) {
+  state.sort = sortKeyOf(k);
+  try { localStorage.setItem(LS_SORT, state.sort); } catch (e) {}
+  syncSortBtn();
+  refreshList();
+}
+
+function syncSortBtn() {
+  const b = $('btnSort');
+  if (!b) return;
+  const s = SORTS.find(x => x.k === state.sort) || SORTS[0];
+  b.dataset.sort = state.sort;
+  b.setAttribute('aria-label', `排序方式：${s.label}`);
+  b.classList.toggle('active', state.sort !== 'name');
+}
+
 function counts() {
   const installed = state.services;
   let guarded = 0, on = 0, off = 0;
@@ -463,9 +500,23 @@ function visibleItems() {
     items.push({ comp, missing: true });
   });
 
+  return sortItems(items);
+}
+
+/* 失效项恒排末尾；其余按当前排序方式，同权重时按应用名 */
+function sortItems(items) {
+  const rank = it => {
+    if (state.sort === 'attention') return state.wanted.has(it.comp) && !state.enabled.has(it.comp) ? 0 : 1;
+    if (state.sort === 'guarded') return state.wanted.has(it.comp) ? 0 : 1;
+    return 0;
+  };
+
   items.sort((a, b) => {
     if (a.missing !== b.missing) return a.missing ? 1 : -1;
-    return cmpLabel(a.comp, b.comp);
+    const ra = rank(a), rb = rank(b);
+    if (ra !== rb) return ra - rb;
+    const c = cmpLabel(a.comp, b.comp);
+    return state.sort === 'nameDesc' ? -c : c;
   });
   return items;
 }
@@ -479,23 +530,24 @@ function rowHtml(comp, missing) {
   const hue = hueFor(pkg);
   const initial = escapeHtml((label || '?').charAt(0).toUpperCase());
 
-  let stateHtml;
-  if (missing) stateHtml = '<span class="state err">不在设备上</span>';
-  else if (on) stateHtml = '<span class="state on">已启用</span>';
-  else if (guarded) stateHtml = '<span class="state err">未启用</span>';
-  else stateHtml = '<span class="state off">未启用</span>';
+  let stateHtml, tone;
+  if (missing) { stateHtml = '<span class="state err">不在设备上</span>'; tone = 'missing'; }
+  else if (on) { stateHtml = '<span class="state on">已启用</span>'; tone = 'on'; }
+  else if (guarded) { stateHtml = '<span class="state err">未启用</span>'; tone = 'warn'; }
+  else { stateHtml = '<span class="state off">未启用</span>'; tone = 'off'; }
 
   const sub = missing
     ? '<span class="row-svc">应用可能已卸载</span>'
     : `<span class="sep">·</span><span class="row-svc">${escapeHtml(svc || '默认服务')}</span>`;
 
   return `
-  <div class="row ${guarded ? 'guarded' : ''} ${!missing && guarded && !on ? 'warn' : ''}"
-       data-comp="${escapeHtml(comp)}" ${missing ? 'data-missing="1"' : ''} tabindex="0" role="button"
+  <div class="row ${guarded ? 'guarded' : ''} ${tone === 'warn' ? 'warn' : ''}"
+       data-comp="${escapeHtml(comp)}" data-tone="${tone}" ${missing ? 'data-missing="1"' : ''}
+       tabindex="0" role="button"
        aria-label="${escapeHtml(label)}，${on ? '已启用' : '未启用'}，${guarded ? '守护中' : '未守护'}">
-    <div class="avatar" style="background:hsl(${hue},52%,46%)">
-      <span>${initial}</span>
-      ${missing ? '' : `<img src="ksu://icon/${escapeHtml(pkg)}" alt="" loading="lazy" onerror="this.remove()">`}
+    <div class="avatar" style="--hue:${hue}">
+      <span class="avatar-text">${initial}</span>
+      ${missing ? '' : `<img src="ksu://icon/${escapeHtml(pkg)}" alt="" decoding="async" onload="this.parentNode.classList.add('has-icon')" onerror="this.remove()">`}
     </div>
     <div class="row-main">
       <div class="row-title"><span class="name">${escapeHtml(label)}</span></div>
@@ -560,20 +612,23 @@ function render() {
     return;
   }
 
-  let html = '';
-  let missingShown = false;
-  items.forEach(it => {
-    if (it.missing && !missingShown) {
-      missingShown = true;
-      html += '<div class="group-label">不在设备上</div>';
-    }
-    html += rowHtml(it.comp, it.missing);
-  });
+  const normal = items.filter(it => !it.missing);
+  const gone = items.filter(it => it.missing);
 
+  let html = '';
+  if (normal.length) {
+    html += '<div class="card-list">' + normal.map(it => rowHtml(it.comp, false)).join('') + '</div>';
+  }
+  if (gone.length) {
+    html += `<div class="group-label">不在设备上<span class="n">${gone.length}</span></div>`;
+    html += '<div class="card-list gone">' + gone.map(it => rowHtml(it.comp, true)).join('') + '</div>';
+  }
+
+  const n = counts();
   const broken = state.services.filter(c => state.wanted.has(c) && !state.enabled.has(c)).length;
   html += `<div class="footnote">
-    共 ${state.services.length} 个无障碍服务 · 守护中 ${counts().guarded} 个${broken ? ` · <b>${broken} 个未启用</b>` : ''}<br>
-    状态每 ${Math.round(POLL_MS / 1000)} 秒自动刷新
+    共 ${state.services.length} 个服务 · 守护 ${n.guarded} 个${broken ? ` · <b>${broken} 个被关掉了</b>` : ''}<br>
+    每 ${Math.round(POLL_MS / 1000)} 秒自动刷新
   </div>`;
 
   list.innerHTML = html;
@@ -587,6 +642,7 @@ function patchRows() {
     if (!comp) return;
     const guarded = state.wanted.has(comp);
     const on = state.enabled.has(comp);
+    const missing = row.dataset.missing === '1';
     row.classList.toggle('guarded', guarded);
 
     const cb = row.querySelector('input[type=checkbox]');
@@ -598,11 +654,25 @@ function patchRows() {
       else if (guarded) { st.className = 'state err'; st.textContent = '未启用'; }
       else { st.className = 'state off'; st.textContent = '未启用'; }
     }
-    row.classList.toggle('warn', guarded && !on && row.dataset.missing !== '1');
+
+    const warn = !missing && guarded && !on;
+    row.classList.toggle('warn', warn);
+    row.dataset.tone = missing ? 'missing' : (on ? 'on' : (warn ? 'warn' : 'off'));
     row.setAttribute('aria-label',
       `${appLabel(comp)}，${on ? '已启用' : '未启用'}，${guarded ? '守护中' : '未守护'}`);
   });
   if (state.openDetail) state.openDetail.sync();
+}
+
+/* 顺序会变时才整表重画，否则原地更新，避免行跳走 */
+function refreshList(force) {
+  renderFilters();
+  renderBanner();
+  const orderMatters = !!force ||
+    state.sort === 'guarded' || state.sort === 'attention' ||
+    state.filter !== 'all' || !!state.query;
+  if (orderMatters) render();
+  else patchRows();
 }
 
 function renderBanner() {
@@ -614,17 +684,14 @@ function renderBanner() {
 
   if (state.loaded && !state.error) {
     const broken = state.services.filter(c => state.wanted.has(c) && !state.enabled.has(c)).length;
-    if (!state.guardAlive) {
-      tone = '';
-      msg = '守护进程未运行，守护列表暂时不会被自动恢复。';
-      action = { label: '启动', k: 'start' };
-    } else if (state.wanted.size === 0) {
-      tone = 'info';
-      msg = '还没有守护任何服务，打开右侧开关即可加入守护。';
+    if (state.wanted.size > 0 && !state.guardAlive) {
+      tone = 'warn';
+      msg = '守护进程没有运行，守护项被系统关掉后不会自动恢复。';
+      action = { label: '启动守护', k: 'start' };
     } else if (broken > 0) {
-      tone = '';
-      msg = `${broken} 个守护中的服务当前处于停用状态，守护进程会在下一轮检查时恢复。`;
-      action = { label: '立即同步', k: 'sync' };
+      tone = 'warn';
+      msg = `${broken} 个守护项被系统关掉了，下一轮检查会自动恢复。`;
+      action = { label: '立即恢复', k: 'sync' };
     }
   }
 
@@ -662,11 +729,7 @@ async function toggleGuard(comp, on) {
   }
 
   scheduleSave();
-  renderFilters();
-  renderBanner();
-
-  if (state.filter !== 'all' || state.query) render();
-  else patchRows();
+  refreshList();
 }
 
 async function setAccessibility(comp, on) {
@@ -888,21 +951,6 @@ function switchLine(title, desc, checked, onToggle) {
 function openSettings() {
   const body = document.createElement('div');
 
-  /* 守护进程 */
-  const statusVal = document.createElement('span');
-  statusVal.className = 'v';
-  statusVal.textContent = state.guardAlive
-    ? `运行中${state.guardPid ? ' · PID ' + state.guardPid : ''}`
-    : '未运行';
-  statusVal.style.color = state.guardAlive ? 'var(--good)' : 'var(--danger)';
-  const statusLine = document.createElement('div');
-  statusLine.className = 'line';
-  const sk = document.createElement('span');
-  sk.className = 'k';
-  sk.textContent = '守护进程';
-  statusLine.appendChild(sk);
-  statusLine.appendChild(statusVal);
-
   const intervalSeg = seg(
     [{ label: '10 秒', value: 10 }, { label: '20 秒', value: 20 }, { label: '30 秒', value: 30 }, { label: '60 秒', value: 60 }],
     state.interval,
@@ -926,17 +974,23 @@ function openSettings() {
   const actions = document.createElement('div');
   actions.className = 'line';
   actions.style.gap = '9px';
-  const btnSync = document.createElement('button');
-  btnSync.className = 'btn soft sm';
-  btnSync.textContent = '立即同步';
-  btnSync.addEventListener('click', async () => {
-    btnSync.disabled = true;
-    const out = await run(`sh ${MODDIR}/data/control.sh once`, 25000);
-    btnSync.disabled = false;
-    const line1 = out.trim().split('\n').filter(Boolean).pop() || '已同步';
-    toast(line1.slice(0, 60));
-    refreshLight();
-  });
+
+  const broken = state.services.filter(c => state.wanted.has(c) && !state.enabled.has(c)).length;
+  if (broken > 0) {
+    const btnRestore = document.createElement('button');
+    btnRestore.className = 'btn soft sm';
+    btnRestore.textContent = `恢复 ${broken} 个被关掉的服务`;
+    btnRestore.addEventListener('click', async () => {
+      btnRestore.disabled = true;
+      const out = await run(`sh ${MODDIR}/data/control.sh once`, 25000);
+      btnRestore.disabled = false;
+      const last = out.trim().split('\n').filter(Boolean).pop() || '已恢复';
+      toast(last.slice(0, 60));
+      refreshLight();
+    });
+    actions.appendChild(btnRestore);
+  }
+
   const btnRestart = document.createElement('button');
   btnRestart.className = 'btn ghost sm';
   btnRestart.textContent = state.guardAlive ? '重启守护' : '启动守护';
@@ -947,10 +1001,9 @@ function openSettings() {
     toast(state.guardAlive ? '守护已重启' : '守护已启动');
     setTimeout(refreshLight, 600);
   });
-  actions.appendChild(btnSync);
   actions.appendChild(btnRestart);
 
-  body.appendChild(section('守护进程', panel([statusLine, intervalLine, actions])));
+  body.appendChild(section('守护进程', panel([intervalLine, actions])));
 
   /* 外观 */
   const themeSeg = seg(
@@ -982,7 +1035,7 @@ function openSettings() {
     state.services.forEach(c => state.wanted.add(c));
     const added = state.wanted.size - before;
     scheduleSave();
-    render();
+    refreshList();
     if (added) toast(`已加入 ${added} 个服务`);
     else toast('已全部在守护列表');
   });
@@ -1001,7 +1054,7 @@ function openSettings() {
     if (!ok) return;
     state.wanted.clear();
     scheduleSave();
-    render();
+    refreshList();
     toast('已清空守护列表');
   });
   batch.appendChild(btnAllOn);
@@ -1019,7 +1072,7 @@ function openSettings() {
     btnClean.addEventListener('click', async () => {
       missing.forEach(c => state.wanted.delete(c));
       scheduleSave();
-      render();
+      refreshList();
       toast(`已清理 ${missing.length} 个失效项`);
     });
     panelChildren.push(btnClean);
@@ -1037,6 +1090,33 @@ function openSettings() {
   body.appendChild(about);
 
   openSheet({ title: '设置', content: body });
+}
+
+function openSort() {
+  const body = document.createElement('div');
+  body.className = 'choice-list';
+
+  SORTS.forEach(s => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'choice' + (state.sort === s.k ? ' active' : '');
+    b.dataset.sort = s.k;
+    b.innerHTML = `
+      <span class="txt"><span class="t"></span><span class="d"></span></span>
+      <span class="check" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12.5 9.5 18 20 6.5"></path></svg>
+      </span>`;
+    $('.t', b).textContent = s.label;
+    $('.d', b).textContent = s.desc;
+    b.addEventListener('click', () => {
+      setSort(s.k);
+      closeSheet();
+      toast(`排序：${s.label}`);
+    });
+    body.appendChild(b);
+  });
+
+  openSheet({ title: '排序方式', subtitle: '只影响显示顺序，不改动守护列表', content: body });
 }
 
 function openLogs() {
@@ -1097,9 +1177,9 @@ function openDetail(comp) {
   const hero = document.createElement('div');
   hero.className = 'detail-hero';
   hero.innerHTML = `
-    <div class="avatar" style="background:hsl(${hueFor(pkg)},52%,46%)">
-      <span>${escapeHtml((label || '?').charAt(0).toUpperCase())}</span>
-      ${missing ? '' : `<img src="ksu://icon/${escapeHtml(pkg)}" alt="" onerror="this.remove()">`}
+    <div class="avatar" style="--hue:${hueFor(pkg)}">
+      <span class="avatar-text">${escapeHtml((label || '?').charAt(0).toUpperCase())}</span>
+      ${missing ? '' : `<img src="ksu://icon/${escapeHtml(pkg)}" alt="" decoding="async" onload="this.parentNode.classList.add('has-icon')" onerror="this.remove()">`}
     </div>
     <div><h2></h2><div class="pkg"></div></div>`;
   $('h2', hero).textContent = label;
@@ -1111,40 +1191,6 @@ function openDetail(comp) {
     sync();
   });
 
-  const accSwitch = switchLine('无障碍服务', '当前状态', state.enabled.has(comp), async on => {
-    if (!on && state.wanted.has(comp)) {
-      // 正在守护却要停用 → 明确二选一，避免「关了 20 秒又被拉回来」的困惑
-      accSwitch._sync(true, state.enabled.has(comp) ? '已启用' : '未启用');
-      const choice = await showDialog({
-        title: '该服务正在守护中',
-        text: '停用后守护进程会在下一轮检查时重新启用它。要同时取消守护吗？',
-        actions: [
-          { label: '停用并取消守护', value: 'both', style: 'danger' },
-          { label: '只停用（稍后会被恢复）', value: 'off', style: 'ghost' },
-          { label: '取消', value: null, style: 'ghost' },
-        ],
-      });
-      if (!choice) { sync(); return; }
-      if (choice === 'both') {
-        state.wanted.delete(comp);
-        scheduleSave();
-      }
-      await setAccessibility(comp, false);
-      toast(choice === 'both' ? '已停用并取消守护' : '已停用，守护会稍后恢复');
-      sync();
-      patchRows();
-      renderFilters();
-      renderBanner();
-      return;
-    }
-    await setAccessibility(comp, on);
-    toast(on ? '已启用无障碍' : '已停用无障碍');
-    sync();
-    patchRows();
-    renderFilters();
-    renderBanner();
-  });
-
   if (missing) {
     const warn = document.createElement('div');
     warn.className = 'banner';
@@ -1153,7 +1199,46 @@ function openDetail(comp) {
     body.appendChild(warn);
   }
 
-  body.appendChild(panel([guardSwitch, accSwitch]));
+  body.appendChild(section('守护', panel([guardSwitch])));
+
+  const accSwitch = missing ? null : switchLine(
+    '手动停用 / 启用',
+    '与守护无关，只改本次状态',
+    state.enabled.has(comp),
+    async on => {
+      if (!on && state.wanted.has(comp)) {
+        // 正在守护却要停用 → 明确二选一，避免「关了 20 秒又被拉回来」的困惑
+        sync();
+        const choice = await showDialog({
+          title: '该服务正在守护中',
+          text: '停用后守护进程会在下一轮检查时重新启用它。要同时取消守护吗？',
+          actions: [
+            { label: '停用并取消守护', value: 'both', style: 'danger' },
+            { label: '只停用（稍后会被恢复）', value: 'off', style: 'ghost' },
+            { label: '取消', value: null, style: 'ghost' },
+          ],
+        });
+        if (!choice) { sync(); return; }
+        if (choice === 'both') {
+          state.wanted.delete(comp);
+          scheduleSave();
+        }
+        await setAccessibility(comp, false);
+        toast(choice === 'both' ? '已停用并取消守护' : '已停用，守护会稍后恢复');
+        sync();
+        refreshList();
+        return;
+      }
+      await setAccessibility(comp, on);
+      toast(on ? '已启用无障碍' : '已停用无障碍');
+      sync();
+      refreshList();
+    }
+  );
+
+  if (accSwitch) {
+    body.appendChild(section('无障碍服务', panel([accSwitch])));
+  }
 
   const copyLine = line('复制组件名', null, {
     clickable: true,
@@ -1175,15 +1260,14 @@ function openDetail(comp) {
 
   const note = document.createElement('div');
   note.className = 'footnote';
-  note.textContent = `守护进程每 ${state.interval} 秒检查一次；关闭开关只会取消守护，不会停用无障碍服务。`;
+  note.textContent = `守护进程每 ${state.interval} 秒检查一次；关掉守护开关不会停用无障碍服务。`;
   body.appendChild(note);
 
   function sync() {
-    guardSwitch._sync(state.wanted.has(comp));
-    accSwitch._sync(state.enabled.has(comp), state.enabled.has(comp) ? '已启用' : '未启用');
-    guardSwitch.querySelector('.d').textContent = state.wanted.has(comp)
-      ? '守护中 · 被系统关闭后自动恢复'
-      : '未守护 · 系统关闭后不会自动恢复';
+    const guarded = state.wanted.has(comp);
+    const on = state.enabled.has(comp);
+    guardSwitch._sync(guarded, guarded ? '守护中 · 被系统关闭后自动恢复' : '未守护 · 系统关闭后不会自动恢复');
+    if (accSwitch) accSwitch._sync(on, on ? '当前已启用' : '当前未启用');
   }
   sync();
 
@@ -1330,7 +1414,7 @@ function startPolling() {
 
 function bindEvents() {
   $('btnSettings').addEventListener('click', openSettings);
-  $('statusChip').addEventListener('click', openSettings);
+  $('btnSort').addEventListener('click', openSort);
 
   $('bannerBtn').addEventListener('click', async e => {
     const action = e.currentTarget.dataset.action;
@@ -1432,6 +1516,7 @@ function debounce(fn, ms) {
 
 async function init() {
   bindEvents();
+  loadSort();
   render();
 
   if (!HAS_KSU) {

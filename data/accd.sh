@@ -11,7 +11,7 @@
 #
 # 用法：
 #   accd.sh           常驻循环
-#   accd.sh --once    只同步一次后退出（KSU 动作按钮 / WebUI「立即同步」）
+#   accd.sh --once    只补回一次后退出（WebUI「立即恢复」）
 
 MOD_ID="acckeyguard"
 MODDIR=${AKG_MODDIR:-/data/adb/modules/$MOD_ID}

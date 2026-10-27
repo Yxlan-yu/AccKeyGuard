@@ -24,7 +24,6 @@ FILES = [
     "module.prop",
     "customize.sh",
     "service.sh",
-    "action.sh",
     "README.md",
     "data/accd.sh",
     "data/control.sh",
@@ -38,7 +37,7 @@ FILES = [
 # Empty directories that must exist in the archive.
 DIRS = ["webroot", "data"]
 
-EXECUTABLE = {"customize.sh", "service.sh", "action.sh", "data/accd.sh", "data/control.sh"}
+EXECUTABLE = {"customize.sh", "service.sh", "data/accd.sh", "data/control.sh"}
 
 
 def read_version():
@@ -132,7 +131,7 @@ def verify(path):
     if bad:
         raise SystemExit("backslash entries present: %r" % bad)
     for required in (b"webroot/", b"webroot/index.html", b"module.prop",
-                     b"service.sh", b"action.sh", b"data/accd.sh",
+                     b"service.sh", b"data/accd.sh",
                      b"data/control.sh"):
         if required not in names:
             raise SystemExit("archive missing %r" % required)

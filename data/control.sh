@@ -5,9 +5,9 @@
 #   control.sh stop      停止
 #   control.sh restart   重启（WebUI「重启守护」/「启动」）
 #   control.sh status    打印运行状态
-#   control.sh once      立即同步一次（WebUI「立即同步」/ KSU 动作按钮）
+#   control.sh once      立即补回一次（WebUI「立即恢复」）
 #
-# 供 WebUI 与 action.sh 调用；全部输出走 stdout，便于界面直接展示。
+# 供 WebUI 调用；全部输出走 stdout，便于界面直接展示。
 
 DIR=${0%/*}
 case "$DIR" in
