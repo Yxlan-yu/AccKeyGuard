@@ -1,13 +1,17 @@
 #!/system/bin/sh
 # AccKeyGuard customize.sh - 安装时执行
-# KernelSU 安装环境提供 $MODPATH 指向模块安装目标
+# KernelSU / Magisk 安装环境提供 $MODPATH 指向模块安装目录
+
 MODPATH=${MODPATH:-/data/adb/modules/acckeyguard}
 
-ui_print "- AccKeyGuard 正在安装..."
+VER=$(grep '^version=' "$MODPATH/module.prop" 2>/dev/null | cut -d= -f2)
 
-# 确保 data 目录存在并设置脚本执行位
-mkdir -p "$MODPATH/data"
-chmod 755 "$MODPATH/data/accd.sh" "$MODPATH/service.sh"
+ui_print "- AccKeyGuard（无障碍保活）正在安装 ${VER}"
+ui_print "- 守护列表与主题保存在 KernelSU module config，升级不会丢失"
 
-ui_print "- 安装完成"
+mkdir -p "$MODPATH/data" "$MODPATH/webroot" 2>/dev/null
+chmod 755 "$MODPATH/action.sh" "$MODPATH/service.sh" "$MODPATH/customize.sh" 2>/dev/null
+chmod 755 "$MODPATH/data/accd.sh" "$MODPATH/data/control.sh" 2>/dev/null
+
+ui_print "- 安装完成，重启后守护自动运行"
 exit 0
