@@ -1,6 +1,0 @@
-build/
-dist/
-.gradle/
-local.properties
-*.iml
-.idea/

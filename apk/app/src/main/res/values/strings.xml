@@ -1,5 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <string name="app_name">AccGuard</string>
-    <string name="xposed_desc">无障碍守护（框架级）：在设置写入与系统读取两端拦截，守住已勾选的无障碍服务不被移除。</string>
-</resources>
