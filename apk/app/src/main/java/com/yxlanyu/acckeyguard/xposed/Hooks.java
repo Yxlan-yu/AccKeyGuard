@@ -14,12 +14,34 @@ import java.util.List;
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
 
-/** All Xposed plumbing. Nothing in here is allowed to throw into the host process. */
+/**
+ * All Xposed plumbing. Nothing in here is allowed to throw into the host process.
+ *
+ * <p>Re-entrancy rules -- v1.0.0 crashed system_server with StackOverflowError, so these
+ * three rules are mandatory and must not be "optimised" away:
+ *
+ * <ol>
+ *   <li>The method of a provider call is ALWAYS {@code args[0]}. Never scan every String
+ *       argument looking for the "akg_" prefix: the config key is itself named
+ *       {@code akg_guard}, so a plain {@code Settings.Secure.getString(cr, "akg_guard")}
+ *       was mistaken for a private call and routed into the status fallback.</li>
+ *   <li>Every hook body runs inside {@link #BUSY}. Any nested {@code Settings.Secure}
+ *       access we perform ourselves lands on the same thread and is therefore skipped,
+ *       so our own reads/writes can never re-enter the hook.</li>
+ *   <li>{@code Guard.refresh()} refuses to re-enter itself as a second safety net.</li>
+ * </ol>
+ */
 final class Hooks {
 
     private static final String SYNC_MARKER = "/data/system/akg_sys.marker";
+    private static final String PUT_SECURE = "PUT_secure";
+
+    /** After this many soft failures we stop logging, after HARD_FAIL we stop hooking. */
+    private static final int SOFT_FAIL = 40;
+    private static final int HARD_FAIL = 200;
 
     private static long sMarkerAt = 0L;
+    private static int sFail = 0;
     private static final ThreadLocal<Boolean> BUSY = new ThreadLocal<>();
 
     private Hooks() {
@@ -28,6 +50,27 @@ final class Hooks {
     static void log(String msg) {
         try {
             XposedBridge.log("[AccGuard] " + msg);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private static boolean busy() {
+        return Boolean.TRUE.equals(BUSY.get());
+    }
+
+    private static boolean dead() {
+        return sFail > HARD_FAIL;
+    }
+
+    /** Never lets an exception escape into the host process, and trips a breaker if we misbehave. */
+    private static void fail(String where, Throwable t) {
+        try {
+            sFail++;
+            if (sFail <= SOFT_FAIL) {
+                XposedBridge.log("[AccGuard] " + where + ": " + t);
+            } else if (sFail == HARD_FAIL + 1) {
+                XposedBridge.log("[AccGuard] " + where + ": too many failures, hook disabled");
+            }
         } catch (Throwable ignored) {
         }
     }
@@ -50,7 +93,7 @@ final class Hooks {
                         if (!Guard.KEY_A11Y.equals(param.args[1])) {
                             return;
                         }
-                        if (Boolean.TRUE.equals(BUSY.get())) {
+                        if (busy() || dead()) {
                             return;
                         }
                         Object a0 = param.args[0];
@@ -75,13 +118,14 @@ final class Hooks {
                             BUSY.remove();
                         }
                     } catch (Throwable t) {
-                        log("sys hook: " + t);
+                        fail("sys hook", t);
                     }
                 }
             });
+            touchMarker();
             log("system hook installed");
         } catch (Throwable t) {
-            log("system hook failed: " + t);
+            fail("system hook install", t);
         }
     }
 
@@ -118,61 +162,48 @@ final class Hooks {
             XposedBridge.hookAllMethods(cls, "call", new XC_MethodHook() {
                 @Override
                 protected void beforeHookedMethod(MethodHookParam param) {
+                    if (busy() || dead()) {
+                        return;
+                    }
                     try {
-                        String method = null;
-                        Bundle extras = null;
-                        if (param.args != null) {
-                            for (Object o : param.args) {
-                                if (o instanceof String && ((String) o).startsWith("akg_")) {
-                                    method = (String) o;
-                                } else if (o instanceof Bundle) {
-                                    extras = (Bundle) o;
-                                }
-                            }
-                        }
-                        if (method == null) {
-                            mergePut(param, extras);
+                        Object[] a = param.args;
+                        if (a == null || a.length < 1 || !(a[0] instanceof String)) {
                             return;
                         }
+                        String method = (String) a[0];
+                        if (method == null || method.length() == 0) {
+                            return;
+                        }
+                        Bundle extras = null;
+                        if (a.length >= 3 && a[2] instanceof Bundle) {
+                            extras = (Bundle) a[2];
+                        }
+
+                        if (!isOurs(method)) {
+                            // legacy write path used by Settings.Secure.putString on some builds
+                            if (PUT_SECURE.equals(method)) {
+                                BUSY.set(Boolean.TRUE);
+                                try {
+                                    mergePut(param, extras);
+                                } finally {
+                                    BUSY.remove();
+                                }
+                            }
+                            return;
+                        }
+
                         ContentResolver cr = resolver(param.thisObject);
                         if (cr == null) {
                             return;
                         }
-                        String value = extras == null ? null : extras.getString(Guard.K_VALUE);
-                        if (Guard.M_STATUS.equals(method)) {
-                            param.setResult(reply(Guard.statusJson(cr)));
-                            return;
+                        BUSY.set(Boolean.TRUE);
+                        try {
+                            handle(param, cr, method, extras);
+                        } finally {
+                            BUSY.remove();
                         }
-                        if (Guard.M_CFG.equals(method)) {
-                            String norm = Guard.normalize(value);
-                            Guard.install(norm);
-                            Settings.Secure.putString(cr, Guard.KEY_CFG, norm);
-                            param.setResult(reply(Guard.statusJson(cr)));
-                            log("config updated");
-                            return;
-                        }
-                        if (Guard.M_CMD.equals(method)) {
-                            String cmd = value == null ? "" : value.trim();
-                            String stored = Settings.Secure.getString(cr, Guard.KEY_CFG);
-                            if ("pause".equals(cmd) || "resume".equals(cmd)) {
-                                Settings.Secure.putString(cr, Guard.KEY_CFG,
-                                        Guard.cfgJson(stored, "resume".equals(cmd)));
-                                Guard.refresh(cr, true);
-                            } else if ("repair".equals(cmd) || "sync".equals(cmd)) {
-                                Guard.refresh(cr, true);
-                                String cur = Settings.Secure.getString(cr, Guard.KEY_A11Y);
-                                String merged = Guard.merge(cur == null ? "" : cur);
-                                if (!merged.equals(cur == null ? "" : cur)) {
-                                    Settings.Secure.putString(cr, Guard.KEY_A11Y, merged);
-                                    log("repaired accessibility list");
-                                }
-                            }
-                            param.setResult(reply(Guard.statusJson(cr)));
-                            return;
-                        }
-                        param.setResult(reply(Guard.statusJson(cr)));
                     } catch (Throwable t) {
-                        log("call hook: " + t);
+                        fail("call hook", t);
                     }
                 }
             });
@@ -180,6 +211,9 @@ final class Hooks {
             XposedBridge.hookAllMethods(cls, "insert", new XC_MethodHook() {
                 @Override
                 protected void beforeHookedMethod(MethodHookParam param) {
+                    if (busy() || dead()) {
+                        return;
+                    }
                     try {
                         if (param.args == null || param.args.length < 2) {
                             return;
@@ -200,18 +234,23 @@ final class Hooks {
                         if (cr == null) {
                             return;
                         }
-                        Guard.refresh(cr, false);
-                        if (Guard.list().length == 0 || !Guard.enabled()) {
-                            return;
-                        }
-                        String cur = stringOf(cv.get(Guard.K_VALUE));
-                        String merged = Guard.merge(cur == null ? "" : cur);
-                        if (!merged.equals(cur)) {
-                            cv.put(Guard.K_VALUE, merged);
-                            log("write merged (+" + Guard.missing(cur == null ? "" : cur) + ")");
+                        BUSY.set(Boolean.TRUE);
+                        try {
+                            Guard.refresh(cr, false);
+                            if (Guard.list().length == 0 || !Guard.enabled()) {
+                                return;
+                            }
+                            String cur = stringOf(cv.get(Guard.K_VALUE));
+                            String merged = Guard.merge(cur == null ? "" : cur);
+                            if (!merged.equals(cur)) {
+                                cv.put(Guard.K_VALUE, merged);
+                                log("write merged (+" + Guard.missing(cur == null ? "" : cur) + ")");
+                            }
+                        } finally {
+                            BUSY.remove();
                         }
                     } catch (Throwable t) {
-                        log("insert hook: " + t);
+                        fail("insert hook", t);
                     }
                 }
             });
@@ -219,6 +258,9 @@ final class Hooks {
             XposedBridge.hookAllMethods(cls, "bulkInsert", new XC_MethodHook() {
                 @Override
                 protected void beforeHookedMethod(MethodHookParam param) {
+                    if (busy() || dead()) {
+                        return;
+                    }
                     try {
                         if (param.args == null || param.args.length < 2) {
                             return;
@@ -231,38 +273,87 @@ final class Hooks {
                         if (cr == null) {
                             return;
                         }
-                        Guard.refresh(cr, false);
-                        if (Guard.list().length == 0 || !Guard.enabled()) {
-                            return;
-                        }
-                        ContentValues[] all = (ContentValues[]) param.args[1];
-                        for (ContentValues cv : all) {
-                            if (cv == null) {
-                                continue;
+                        BUSY.set(Boolean.TRUE);
+                        try {
+                            Guard.refresh(cr, false);
+                            if (Guard.list().length == 0 || !Guard.enabled()) {
+                                return;
                             }
-                            String name = stringOf(cv.get(Guard.K_NAME));
-                            if (name == null) {
-                                name = lastSegment(uri);
+                            ContentValues[] all = (ContentValues[]) param.args[1];
+                            for (ContentValues cv : all) {
+                                if (cv == null) {
+                                    continue;
+                                }
+                                String name = stringOf(cv.get(Guard.K_NAME));
+                                if (name == null) {
+                                    name = lastSegment(uri);
+                                }
+                                if (!Guard.KEY_A11Y.equals(name)) {
+                                    continue;
+                                }
+                                String cur = stringOf(cv.get(Guard.K_VALUE));
+                                String merged = Guard.merge(cur == null ? "" : cur);
+                                if (!merged.equals(cur)) {
+                                    cv.put(Guard.K_VALUE, merged);
+                                }
                             }
-                            if (!Guard.KEY_A11Y.equals(name)) {
-                                continue;
-                            }
-                            String cur = stringOf(cv.get(Guard.K_VALUE));
-                            String merged = Guard.merge(cur == null ? "" : cur);
-                            if (!merged.equals(cur)) {
-                                cv.put(Guard.K_VALUE, merged);
-                            }
+                        } finally {
+                            BUSY.remove();
                         }
                     } catch (Throwable t) {
-                        log("bulkInsert hook: " + t);
+                        fail("bulkInsert hook", t);
                     }
                 }
             });
 
             log("provider hook installed");
         } catch (Throwable t) {
-            log("provider hook failed: " + t);
+            fail("provider hook install", t);
         }
+    }
+
+    /** Only exact names are ours -- never a prefix test, see the class comment. */
+    private static boolean isOurs(String method) {
+        return Guard.M_STATUS.equals(method)
+                || Guard.M_CFG.equals(method)
+                || Guard.M_CMD.equals(method);
+    }
+
+    private static void handle(XC_MethodHook.MethodHookParam param, ContentResolver cr,
+                               String method, Bundle extras) {
+        String value = extras == null ? null : extras.getString(Guard.K_VALUE);
+        if (Guard.M_STATUS.equals(method)) {
+            param.setResult(reply(Guard.statusJson(cr)));
+            return;
+        }
+        if (Guard.M_CFG.equals(method)) {
+            String norm = Guard.normalize(value);
+            Guard.install(norm);
+            Settings.Secure.putString(cr, Guard.KEY_CFG, norm);
+            param.setResult(reply(Guard.statusJson(cr)));
+            log("config updated");
+            return;
+        }
+        if (Guard.M_CMD.equals(method)) {
+            String cmd = value == null ? "" : value.trim();
+            String stored = Settings.Secure.getString(cr, Guard.KEY_CFG);
+            if ("pause".equals(cmd) || "resume".equals(cmd)) {
+                Settings.Secure.putString(cr, Guard.KEY_CFG,
+                        Guard.cfgJson(stored, "resume".equals(cmd)));
+                Guard.refresh(cr, true);
+            } else if ("repair".equals(cmd) || "sync".equals(cmd)) {
+                Guard.refresh(cr, true);
+                String cur = Settings.Secure.getString(cr, Guard.KEY_A11Y);
+                String merged = Guard.merge(cur == null ? "" : cur);
+                if (!merged.equals(cur == null ? "" : cur)) {
+                    Settings.Secure.putString(cr, Guard.KEY_A11Y, merged);
+                    log("repaired accessibility list");
+                }
+            }
+            param.setResult(reply(Guard.statusJson(cr)));
+            return;
+        }
+        param.setResult(reply(Guard.statusJson(cr)));
     }
 
     /** Handles the legacy {@code PUT_secure} call path used by some system components. */

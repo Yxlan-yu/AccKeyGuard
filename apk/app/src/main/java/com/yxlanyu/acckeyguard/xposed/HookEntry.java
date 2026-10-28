@@ -14,8 +14,12 @@ public final class HookEntry implements IXposedHookLoadPackage {
                 return;
             }
             if ("android".equals(lpparam.packageName)) {
+                // SettingsProvider lives inside system_server on this build, so both hook sets
+                // have to be installed from the "android" package.
                 Hooks.installSystem(lpparam.classLoader);
+                Hooks.installProvider(lpparam.classLoader);
             } else if ("com.android.providers.settings".equals(lpparam.packageName)) {
+                // Older builds keep the provider in its own process; harmless no-op elsewhere.
                 Hooks.installProvider(lpparam.classLoader);
             }
         } catch (Throwable t) {

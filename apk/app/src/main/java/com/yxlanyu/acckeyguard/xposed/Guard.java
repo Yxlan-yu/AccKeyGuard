@@ -30,6 +30,8 @@ final class Guard {
     static final String K_NAME = "name";
 
     private static final Object LOCK = new Object();
+    /** Guards {@link #refresh} against re-entering itself through the settings provider hook. */
+    private static final ThreadLocal<Boolean> READING = new ThreadLocal<>();
 
     private static String[] sList = new String[0];
     private static boolean sEnabled = true;
@@ -42,6 +44,14 @@ final class Guard {
     /* ---------------------------------------------------------------- config */
 
     static void refresh(ContentResolver cr, boolean force) {
+        if (cr == null) {
+            return;
+        }
+        // Second safety net: our own Settings.Secure read can land back in the provider hook,
+        // which used to call statusJson() -> refresh() -> getString() -> hook -> ... forever.
+        if (Boolean.TRUE.equals(READING.get())) {
+            return;
+        }
         long now = System.currentTimeMillis();
         synchronized (LOCK) {
             if (!force && sStamp != 0L && now - sRead < 2000L) {
@@ -49,6 +59,7 @@ final class Guard {
             }
         }
         String raw;
+        READING.set(Boolean.TRUE);
         try {
             raw = Settings.Secure.getString(cr, KEY_CFG);
         } catch (Throwable ignored) {
@@ -60,6 +71,8 @@ final class Guard {
                 }
             }
             return;
+        } finally {
+            READING.remove();
         }
         apply(raw);
     }
